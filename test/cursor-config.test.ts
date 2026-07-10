@@ -29,6 +29,7 @@ import {
 	loadCursorSdkConfigForUpdate,
 	loadCursorSdkUserConfig,
 	mergeCursorSdkConfig,
+	parseCursorSdkConfig,
 	resolveCursorFastDefault,
 	resolveCursorSdkConfig,
 	saveCursorSdkProjectConfig,
@@ -606,6 +607,47 @@ describe("Cursor SDK config resolver", () => {
 			sandboxEnabled: expect.objectContaining({ value: false, source: "cli" }),
 			force: expect.objectContaining({ value: false, source: "cli" }),
 			resume: expect.objectContaining({ value: false, source: "cli" }),
+		});
+	});
+
+	describe("proxy config", () => {
+		it("parses proxy block from cursor-sdk.json", () => {
+			const parsed = parseCursorSdkConfig({
+				proxy: {
+					url: "http://127.0.0.1:8888",
+					httpsUrl: "http://127.0.0.1:8888",
+					noProxy: "localhost,127.0.0.1,.internal.corp.com",
+				},
+			});
+			expect(parsed?.proxy).toBeDefined();
+			expect(parsed!.proxy!.url).toBe("http://127.0.0.1:8888");
+			expect(parsed!.proxy!.httpsUrl).toBe("http://127.0.0.1:8888");
+			expect(parsed!.proxy!.noProxy).toBe("localhost,127.0.0.1,.internal.corp.com");
+		});
+
+		it("parses proxy with only url (httpsUrl falls back to url at runtime)", () => {
+			const parsed = parseCursorSdkConfig({
+				proxy: { url: "http://proxy.example.com:3128" },
+			});
+			expect(parsed?.proxy).toBeDefined();
+			expect(parsed!.proxy!.url).toBe("http://proxy.example.com:3128");
+			expect(parsed!.proxy!.httpsUrl).toBeUndefined();
+			expect(parsed!.proxy!.noProxy).toBeUndefined();
+		});
+
+		it("ignores empty proxy block", () => {
+			const parsed = parseCursorSdkConfig({ proxy: {} });
+			expect(parsed?.proxy).toBeUndefined();
+		});
+
+		it("stores and loads proxy settings via save/load", () => {
+			const config = { proxy: { url: "http://127.0.0.1:20171", httpsUrl: "http://127.0.0.1:20171", noProxy: "localhost" } };
+			const userPath = getCursorSdkUserConfigPath(agentDir);
+			saveCursorSdkUserConfig(config as Parameters<typeof saveCursorSdkUserConfig>[0], userPath);
+			const loaded = loadCursorSdkUserConfig(userPath);
+			expect(loaded?.proxy?.url).toBe("http://127.0.0.1:20171");
+			expect(loaded?.proxy?.httpsUrl).toBe("http://127.0.0.1:20171");
+			expect(loaded?.proxy?.noProxy).toBe("localhost");
 		});
 	});
 });

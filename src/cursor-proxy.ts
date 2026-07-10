@@ -1,4 +1,3 @@
-import { pathToFileURL } from "node:url";
 import { loadCursorSdkUserConfig } from "./cursor-config.js";
 
 /**
@@ -26,10 +25,12 @@ export async function tryConfigureCursorProxy(): Promise<void> {
 
 	// ── 3. 设置 undici 全局代理 ────────────────────────────────
 	try {
-		const undiciPath = pathToFileURL(
-			"node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js",
+		// 用 import.meta.url 定位，不受 CWD 影响
+		const undiciUrl = new URL(
+			"../node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js",
+			import.meta.url,
 		).href;
-		const undici = await import(undiciPath);
+		const undici = await import(undiciUrl);
 
 		// 构造参数：优先用配置值，留空则让 EnvHttpProxyAgent 从 env 读取
 		const opts: Record<string, string | undefined> = {};
