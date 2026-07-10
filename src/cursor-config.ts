@@ -74,6 +74,11 @@ export interface CursorSdkConfig {
 		resume?: boolean;
 		useHttp1ForAgent?: boolean;
 	};
+	proxy?: {
+		url?: string;
+		httpsUrl?: string;
+		noProxy?: string;
+	};
 }
 
 export interface CursorSafetyCap<T> {
@@ -283,6 +288,19 @@ export function parseCursorSdkConfig(value: unknown): CursorSdkConfig | undefine
 		const sandboxOptions = asRecord(local.sandboxOptions);
 		if (typeof sandboxOptions?.enabled === "boolean") parsedLocal.sandboxOptions = { enabled: sandboxOptions.enabled };
 		if (Object.keys(parsedLocal).length > 0) config.local = parsedLocal;
+	}
+
+	// ── proxy ────────────────────────────────────────────────
+	const proxy = asRecord(record.proxy);
+	if (proxy) {
+		const parsedProxy: NonNullable<CursorSdkConfig["proxy"]> = {};
+		const url = parseNonEmptyString(proxy.url);
+		const httpsUrl = parseNonEmptyString(proxy.httpsUrl);
+		const noProxy = parseNonEmptyString(proxy.noProxy);
+		if (url) parsedProxy.url = url;
+		if (httpsUrl) parsedProxy.httpsUrl = httpsUrl;
+		if (noProxy) parsedProxy.noProxy = noProxy;
+		if (Object.keys(parsedProxy).length > 0) config.proxy = parsedProxy;
 	}
 
 	return config;

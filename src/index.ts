@@ -15,6 +15,7 @@ import { registerCursorFallbackIssueWarning } from "./cursor-fallback-warning.js
 import { registerCursorAgentsContextDedup } from "./cursor-agents-context-registration.js";
 import { registerCursorOverflowNormalization } from "./cursor-provider-overflow.js";
 import { registerCursorSdkSessionProcessErrorGuard } from "./cursor-sdk-process-error-guard.js";
+import { tryConfigureCursorProxy } from "./cursor-proxy.js";
 
 type CursorExtensionApi =
 	& Pick<ExtensionAPI, "registerProvider" | "registerCommand" | "on">
@@ -48,6 +49,9 @@ function registerCursorProvider(pi: Pick<ExtensionAPI, "registerProvider">, mode
 }
 
 export default async function (pi: CursorExtensionApi) {
+	// ── Proxy: 从配置文件或环境变量读取 HTTP_PROXY ───────────
+	await tryConfigureCursorProxy();
+
 	// Session cwd must register before other session_start listeners that depend on it.
 	registerCursorSessionScope(pi);
 	registerCursorSessionAgentLineage(pi);
