@@ -1,49 +1,134 @@
-import { loadCursorSdkUserConfig } from "./cursor-config.js";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { ProxyAgent, request as undiciRequest } from "undici";
 
 /**
- * Configure undici global dispatcher with proxy settings.
+ * Shared proxy config shape from ~/.pi/agent/x-proxy.json.
  *
- * Reads from:
- *   1. (最高) ~/.pi/agent/cursor-sdk.json → proxy 字段
- *   2. (回退) HTTPS_PROXY / HTTP_PROXY / ALL_PROXY + NO_PROXY 环境变量
- *   3. 两者都没有 → 不启用
+ * @public
+ */
+export interface SharedProxyConfig {
+	url?: string;
+	httpsUrl?: string;
+	noProxy?: string;
+	noPrint?: boolean;
+}
+
+/**
+ * 读取 ~/.pi/agent/x-proxy.json 中的共享代理配置。
+ * 文件不存在或格式不对 → undefined。
+ */
+function loadSharedProxyConfig(): { config: SharedProxyConfig; sourcePath: string } | undefined {
+	const path = join(getAgentDir(), "x-proxy.json");
+	if (!existsSync(path)) return undefined;
+	try {
+		const raw = JSON.parse(readFileSync(path, "utf-8"));
+		const p = raw?.proxy;
+		if (!p || typeof p !== "object") return undefined;
+		const config: SharedProxyConfig = {};
+		if (typeof p.url === "string" && p.url.trim()) config.url = p.url.trim();
+		if (typeof p.httpsUrl === "string" && p.httpsUrl.trim())
+			config.httpsUrl = p.httpsUrl.trim();
+		if (typeof p.noProxy === "string" && p.noProxy.trim())
+			config.noProxy = p.noProxy.trim();
+		if (p.noPrint === true) config.noPrint = true;
+		if (!config.url && !config.httpsUrl) return undefined;
+		return { config, sourcePath: path };
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * 用 undici.ProxyAgent + undici.request({ dispatcher }) 创建代理 fetch。
  *
- * 必须且只需在扩展启动时调用一次，在所有 fetch() 之前。
+ * - 根据 URL scheme 选择 http/https ProxyAgent
+ * - 命中 noProxy 列表的请求走原始 fetch
+ * - 缺少对应 dispatcher 时回退原始 fetch
+ */
+export function createProxiedFetch(
+	original: typeof fetch,
+	cfg: SharedProxyConfig,
+): typeof fetch {
+	const httpAgent = cfg.url ? new ProxyAgent(cfg.url) : undefined;
+	const httpsAgent = cfg.httpsUrl ? new ProxyAgent(cfg.httpsUrl) : httpAgent;
+
+	if (!httpAgent && !httpsAgent) return original;
+
+	const noProxy = (cfg.noProxy ?? "")
+		.split(",")
+		.map((s) => s.trim().toLowerCase())
+		.filter(Boolean);
+
+	return async function proxiedFetch(input, init) {
+		const req = new Request(input, init);
+		const url = new URL(req.url);
+
+		// noProxy 检查：精确匹配 hostname 或 .domain 后缀
+		if (
+			noProxy.some(
+				(p) => url.hostname === p || url.hostname.endsWith("." + p),
+			)
+		) {
+			return original(req);
+		}
+
+		const dispatcher =
+			url.protocol === "https:"
+				? (httpsAgent ?? httpAgent)
+				: httpAgent;
+		if (!dispatcher) return original(req);
+
+		const body = req.body ? Buffer.from(await req.arrayBuffer()) : null;
+		const result = await undiciRequest(url.href, {
+			method: req.method,
+			headers: Object.fromEntries(req.headers),
+			body,
+			signal: req.signal,
+			dispatcher,
+		});
+
+		const hdrs = new Headers();
+		for (const [k, v] of Object.entries(result.headers)) {
+			if (v !== undefined) {
+				hdrs.set(k, Array.isArray(v) ? v.join(", ") : v);
+			}
+		}
+		return new Response(result.body, {
+			status: result.statusCode,
+			statusText: result.statusText ?? "",
+			headers: hdrs,
+		});
+	};
+}
+
+/**
+ * 配置 Cursor 扩展的 HTTP 代理。
+ *
+ * 从 ~/.pi/agent/x-proxy.json 读取共享代理配置。
+ * 有 proxy 时：
+ *   - 用 undici.ProxyAgent + undici.request({ dispatcher }) 创建代理 fetch
+ *   - 替换 globalThis.fetch，不调用 setGlobalDispatcher
+ *   - noPrint 不为 true 时打印一行到 stderr
+ *
+ * 必须在扩展启动时调用一次，在所有 fetch() 之前。
  */
 export async function tryConfigureCursorProxy(): Promise<void> {
-	// ── 1. 从扩展配置文件读取 ──────────────────────────────────
-	const userConfig = loadCursorSdkUserConfig();
-	const cfgProxy = userConfig?.proxy;
+	const loaded = loadSharedProxyConfig();
+	if (!loaded) return;
 
-	// ── 2. 解析最终代理设置（配置 > 环境变量） ──────────────────
-	const httpProxy = cfgProxy?.url ?? process.env.HTTP_PROXY ?? process.env.http_proxy ?? process.env.ALL_PROXY ?? undefined;
-	const httpsProxy = cfgProxy?.httpsUrl ?? cfgProxy?.url ?? process.env.HTTPS_PROXY ?? process.env.https_proxy ?? process.env.ALL_PROXY ?? undefined;
-	const noProxyList = cfgProxy?.noProxy ?? process.env.NO_PROXY ?? process.env.no_proxy ?? undefined;
+	const { config, sourcePath } = loaded;
 
-	const effectiveUrl = httpsProxy ?? httpProxy;
-	if (!effectiveUrl) return; // 没有任何代理配置，跳过
-
-	// ── 3. 设置 undici 全局代理 ────────────────────────────────
 	try {
-		// 用 import.meta.url 定位，不受 CWD 影响
-		const undiciUrl = new URL(
-			"../node_modules/@earendil-works/pi-coding-agent/node_modules/undici/index.js",
-			import.meta.url,
-		).href;
-		const undici = await import(undiciUrl);
+		globalThis.fetch = createProxiedFetch(globalThis.fetch, config);
 
-		// 构造参数：优先用配置值，留空则让 EnvHttpProxyAgent 从 env 读取
-		const opts: Record<string, string | undefined> = {};
-		if (httpProxy) opts.httpProxy = httpProxy;
-		if (httpsProxy) opts.httpsProxy = httpsProxy;
-		if (noProxyList) opts.noProxy = noProxyList;
-
-		undici.setGlobalDispatcher(
-			new undici.EnvHttpProxyAgent(Object.keys(opts).length > 0 ? opts : undefined),
-		);
-
-		const source = httpProxy === cfgProxy?.url || httpsProxy === cfgProxy?.httpsUrl ? "config" : "env";
-		console.error(`[cursor-sdk] Proxy enabled (source=${source}): ${httpsProxy || httpProxy}`);
+		if (!config.noPrint) {
+			const label = sourcePath.replace(getAgentDir(), "~/.pi/agent");
+			console.error(
+				`[cursor-sdk] Proxy enabled (${label}): ${config.httpsUrl ?? config.url}`,
+			);
+		}
 	} catch (e) {
 		console.error("[cursor-sdk] Failed to configure proxy:", e);
 	}

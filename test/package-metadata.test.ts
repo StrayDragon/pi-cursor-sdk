@@ -110,7 +110,7 @@ describe("package metadata cutover baselines", () => {
 	});
 
 	it("leaves the Cursor SDK transport dependency tree to npm resolution", () => {
-		expect(packageJson.dependencies.undici).toBeUndefined();
+		expect(packageJson.dependencies.undici).toBe("^7.28.0");
 		expect(packageJson.bundledDependencies).toEqual([...BUNDLED_MCP_HONO_CLOSURE]);
 		expect(packageJson.bundledDependencies).not.toContain("undici");
 		expect(packageJson.bundledDependencies).not.toContain("@cursor/sdk");
