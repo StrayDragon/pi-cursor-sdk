@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { ProxyAgent, request as undiciRequest } from "undici";
 
 /**
  * Shared proxy config shape from ~/.pi/agent/x-proxy.json.
@@ -46,11 +46,16 @@ function loadSharedProxyConfig(): { config: SharedProxyConfig; sourcePath: strin
  * - 根据 URL scheme 选择 http/https ProxyAgent
  * - 命中 noProxy 列表的请求走原始 fetch
  * - 缺少对应 dispatcher 时回退原始 fetch
+ *
+ * undici 是懒加载的：只有真正需要代理时才 import，避免在未配置代理
+ * （以及没有打包 undici）的安装环境中拖垮扩展加载。
  */
-export function createProxiedFetch(
+export async function createProxiedFetch(
 	original: typeof fetch,
 	cfg: SharedProxyConfig,
-): typeof fetch {
+): Promise<typeof fetch> {
+	const { ProxyAgent, request: undiciRequest } = await import("undici");
+
 	const httpAgent = cfg.url ? new ProxyAgent(cfg.url) : undefined;
 	const httpsAgent = cfg.httpsUrl ? new ProxyAgent(cfg.httpsUrl) : httpAgent;
 
@@ -95,11 +100,14 @@ export function createProxiedFetch(
 				hdrs.set(k, Array.isArray(v) ? v.join(", ") : v);
 			}
 		}
-		return new Response(result.body, {
-			status: result.statusCode,
-			statusText: result.statusText ?? "",
-			headers: hdrs,
-		});
+		return new Response(
+			Readable.toWeb(result.body) as ReadableStream<Uint8Array>,
+			{
+				status: result.statusCode,
+				statusText: result.statusText ?? "",
+				headers: hdrs,
+			},
+		);
 	};
 }
 
@@ -121,7 +129,7 @@ export async function tryConfigureCursorProxy(): Promise<void> {
 	const { config, sourcePath } = loaded;
 
 	try {
-		globalThis.fetch = createProxiedFetch(globalThis.fetch, config);
+		globalThis.fetch = await createProxiedFetch(globalThis.fetch, config);
 
 		if (!config.noPrint) {
 			const label = sourcePath.replace(getAgentDir(), "~/.pi/agent");
